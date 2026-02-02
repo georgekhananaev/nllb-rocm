@@ -4,6 +4,7 @@
 import ctranslate2
 import os
 import sys
+import threading
 from transformers import NllbTokenizer
 from flask import Flask, request, jsonify
 
@@ -16,6 +17,7 @@ MODEL_PATH = os.environ.get("MODEL_PATH", "/models/nllb-200-3.3B-ct2-int8")
 translator = None
 tokenizer = None
 device_used = None
+translate_lock = threading.Lock()
 
 def get_device():
     """Try to use GPU, fallback to CPU."""
@@ -67,36 +69,37 @@ def init_model():
     return device_used
 
 def translate(text, source_lang="eng_Latn", target_lang="ukr_Cyrl"):
-    """Translate text using NLLB model."""
+    """Translate text using NLLB model (thread-safe)."""
     global translator, tokenizer
 
-    # Set source language
-    tokenizer.src_lang = source_lang
+    with translate_lock:
+        # Set source language
+        tokenizer.src_lang = source_lang
 
-    # Tokenize
-    encoded = tokenizer(text, return_tensors=None, truncation=True, max_length=512)
-    source_tokens = tokenizer.convert_ids_to_tokens(encoded["input_ids"])
+        # Tokenize
+        encoded = tokenizer(text, return_tensors=None, truncation=True, max_length=512)
+        source_tokens = tokenizer.convert_ids_to_tokens(encoded["input_ids"])
 
-    # Translate
-    results = translator.translate_batch(
-        [source_tokens],
-        target_prefix=[[target_lang]],
-        beam_size=4,
-        max_decoding_length=256,
-    )
+        # Translate
+        results = translator.translate_batch(
+            [source_tokens],
+            target_prefix=[[target_lang]],
+            beam_size=4,
+            max_decoding_length=256,
+        )
 
-    # Get output tokens
-    output_tokens = results[0].hypotheses[0]
+        # Get output tokens
+        output_tokens = results[0].hypotheses[0]
 
-    # Remove target language token if present
-    if output_tokens and output_tokens[0] == target_lang:
-        output_tokens = output_tokens[1:]
+        # Remove target language token if present
+        if output_tokens and output_tokens[0] == target_lang:
+            output_tokens = output_tokens[1:]
 
-    # Decode
-    output_ids = tokenizer.convert_tokens_to_ids(output_tokens)
-    output_text = tokenizer.decode(output_ids, skip_special_tokens=True)
+        # Decode
+        output_ids = tokenizer.convert_tokens_to_ids(output_tokens)
+        output_text = tokenizer.decode(output_ids, skip_special_tokens=True)
 
-    return output_text
+        return output_text
 
 @app.route("/translate", methods=["POST"])
 def translate_endpoint():
@@ -167,7 +170,7 @@ def main():
     else:
         # Server mode
         print("Starting translation server on port 5000...")
-        app.run(host="0.0.0.0", port=5000)
+        app.run(host="0.0.0.0", port=5000, threaded=True)
 
 if __name__ == "__main__":
     main()
