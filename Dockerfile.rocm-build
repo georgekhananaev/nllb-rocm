@@ -1,0 +1,61 @@
+# NLLB Translation with CTranslate2 built from source for ROCm (AMD RX 6600)
+FROM rocm/pytorch:rocm6.2.3_ubuntu22.04_py3.10_pytorch_release_2.3.0
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y \
+    git \
+    cmake \
+    build-essential \
+    libopenblas-dev \
+    ninja-build \
+    python3-dev \
+    pybind11-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python dependencies (except ctranslate2)
+RUN pip install --no-cache-dir \
+    transformers \
+    sentencepiece \
+    flask \
+    tokenizers \
+    pybind11
+
+# Clone CTranslate2
+WORKDIR /build
+RUN git clone --recursive https://github.com/OpenNMT/CTranslate2.git && \
+    cd CTranslate2 && \
+    git checkout v3.23.0
+
+# Copy ROCm patch
+COPY ct2_rocm.patch /build/CTranslate2/
+
+# Apply ROCm patch
+WORKDIR /build/CTranslate2
+RUN git apply ct2_rocm.patch
+
+# Build CTranslate2 with ROCm support for RX 6600 (gfx1030)
+RUN mkdir build && cd build && \
+    cmake .. \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DWITH_CUDA=ON \
+        -DGPU_RUNTIME=HIP \
+        -DWITH_CUDNN=ON \
+        -DCMAKE_HIP_ARCHITECTURES="gfx1030" \
+        -DWITH_MKL=OFF \
+        -DOPENMP_RUNTIME=COMP \
+        -DCMAKE_INSTALL_PREFIX=/usr/local \
+        -GNinja && \
+    ninja -j$(nproc) && \
+    ninja install
+
+# Build Python bindings
+WORKDIR /build/CTranslate2/python
+RUN pip install --no-build-isolation -v .
+
+# Set environment for RX 6600 (gfx1032 -> gfx1030)
+ENV HSA_OVERRIDE_GFX_VERSION=10.3.0
+ENV ROCR_VISIBLE_DEVICES=0
+ENV LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
+
+WORKDIR /app
+CMD ["/bin/bash"]

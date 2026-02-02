@@ -1,0 +1,29 @@
+version: "3.8"
+
+services:
+  nllb-translator:
+    image: nllb-rocm-gpu:latest
+    container_name: nllb-translator
+    privileged: true
+    volumes:
+      - ./models:/models:ro
+      - ./scripts:/scripts:ro
+    environment:
+      - HSA_OVERRIDE_GFX_VERSION=10.3.0
+      - MODEL_PATH=/models/nllb-200-3.3B-ct2-int8
+      - ROCR_VISIBLE_DEVICES=0
+      - LD_LIBRARY_PATH=/usr/local/lib:/opt/rocm/lib
+    devices:
+      - /dev/kfd:/dev/kfd
+      - /dev/dri:/dev/dri
+    group_add:
+      - video
+      - render
+    security_opt:
+      - seccomp:unconfined
+    cap_add:
+      - SYS_PTRACE
+    ports:
+      - "5000:5000"
+    command: python /scripts/translate.py
+    restart: unless-stopped
