@@ -1,53 +1,114 @@
-# NLLB Translation Service with AMD GPU (ROCm)
+# NLLB Translation API for AMD GPUs (ROCm)
 
-A self-hosted multilingual translation service using Meta's NLLB-200 model running on AMD GPUs via ROCm.
+A self-hosted multilingual translation API using Meta's **NLLB-200** model, optimized for **AMD GPUs** via ROCm. Includes FastAPI with Swagger UI and token-based authentication.
+
+![License](https://img.shields.io/badge/license-MIT-blue.svg)
+![Python](https://img.shields.io/badge/python-3.10+-green.svg)
+![ROCm](https://img.shields.io/badge/ROCm-6.2-red.svg)
 
 ## Features
 
-- **FastAPI** with automatic Swagger UI documentation
-- **Token-based authentication** with SQLite database
-- **GPU acceleration** on AMD GPUs via ROCm
-- **200+ language** support via NLLB-200 model
-- **Thread-safe** parallel request handling
+- **AMD GPU Acceleration** - Runs on AMD GPUs using ROCm (not just NVIDIA!)
+- **200+ Languages** - Full NLLB-200 model support
+- **FastAPI + Swagger UI** - Interactive API documentation at `/docs`
+- **Token Authentication** - Secure API access with Bearer tokens
+- **SQLite Token Management** - Create, list, and revoke API tokens
+- **Thread-safe** - Handles concurrent requests properly
+- **Docker Ready** - Complete containerized setup
 
-## Overview
+## Supported Hardware
 
-This project runs the **NLLB-200-3.3B-ct2-int8** model (No Language Left Behind) on an AMD RX 6600 GPU using CTranslate2 compiled with ROCm support. The model supports translation between 200+ languages.
+### Tested GPU
 
-### Model Details
+| GPU | Architecture | VRAM | Status |
+|-----|--------------|------|--------|
+| AMD Radeon RX 6600 | RDNA2 (gfx1032) | 8GB | ✅ Tested & Working |
 
-- **Model**: `nllb-200-3.3B-ct2-int8` from [OpenNMT/nllb-200-3.3B-ct2-int8](https://huggingface.co/OpenNMT/nllb-200-3.3B-ct2-int8)
-- **Parameters**: 3.3 billion (quantized to int8)
-- **Size**: ~3.2GB on disk
-- **Quantization**: int8 (CPU) / int8_float16 (GPU)
-- **Framework**: CTranslate2 with ROCm/HIP backend, FastAPI
+### Should Work (Untested)
 
-### Why Custom Build?
+| GPU Family | Architecture | Notes |
+|------------|--------------|-------|
+| RX 6600 XT | RDNA2 (gfx1032) | Same arch as RX 6600 |
+| RX 6700 XT | RDNA2 (gfx1031) | May need `HSA_OVERRIDE_GFX_VERSION=10.3.0` |
+| RX 6800/6900 | RDNA2 (gfx1030) | Native gfx1030 support |
+| RX 7000 series | RDNA3 | May require different patches |
 
-The standard `pip install ctranslate2` package only supports NVIDIA CUDA. For AMD GPUs (ROCm), CTranslate2 must be built from source with HIP support. This project includes:
+### Requirements
 
-- A ROCm patch (`ct2_rocm.patch`) for CTranslate2 v3.23.0
-- Pre-built Docker image with ROCm-enabled CTranslate2
-
-## Requirements
-
-- AMD GPU with ROCm support (tested on RX 6600)
-- Docker with GPU passthrough
-- ~4GB GPU memory for inference
-- ~60GB disk space for Docker image
+- **ROCm 6.x** compatible AMD GPU
+- **Docker** with GPU passthrough
+- **8GB+ VRAM** recommended for 3.3B model
+- **~4GB RAM** for model loading
+- **~60GB disk** for Docker image
 
 ## Quick Start
 
-### Start the Translation Service
+### 1. Clone and Download Model
+
+```bash
+git clone https://github.com/YOUR_USERNAME/nllb-rocm.git
+cd nllb-rocm
+
+# Create directories
+mkdir -p models data
+
+# Download model from HuggingFace (~3.2GB)
+# Option A: Using huggingface-cli
+pip install huggingface_hub
+huggingface-cli download OpenNMT/nllb-200-3.3B-ct2-int8 --local-dir models/nllb-200-3.3B-ct2-int8
+
+# Option B: Using git lfs
+git lfs install
+git clone https://huggingface.co/OpenNMT/nllb-200-3.3B-ct2-int8 models/nllb-200-3.3B-ct2-int8
+```
+
+### 2. Build Docker Image (First Time Only)
+
+The image includes CTranslate2 built from source with ROCm support:
+
+```bash
+# Start build container
+docker run -d --privileged --name ct2-builder \
+    -v $(pwd):/workspace \
+    rocm/pytorch:rocm6.2.3_ubuntu22.04_py3.10_pytorch_release_2.3.0 \
+    sleep infinity
+
+# Install dependencies and build (takes ~10-15 minutes)
+docker exec ct2-builder bash -c "
+    apt-get update && apt-get install -y git cmake ninja-build &&
+    pip install transformers sentencepiece flask tokenizers pybind11 fastapi uvicorn &&
+    cd /build &&
+    git clone --recursive https://github.com/OpenNMT/CTranslate2.git &&
+    cd CTranslate2 && git checkout v3.23.0 &&
+    cp /workspace/ct2_rocm.patch . && git apply ct2_rocm.patch &&
+    mkdir build && cd build &&
+    cmake .. -DCMAKE_BUILD_TYPE=Release -DWITH_CUDA=ON -DGPU_RUNTIME=HIP \
+        -DWITH_CUDNN=ON -DCMAKE_HIP_ARCHITECTURES='gfx1030' \
+        -DWITH_MKL=OFF -DOPENMP_RUNTIME=COMP -GNinja &&
+    ninja -j\$(nproc) && ninja install &&
+    export LD_LIBRARY_PATH=/usr/local/lib:\$LD_LIBRARY_PATH &&
+    export LIBRARY_PATH=/usr/local/lib:\$LIBRARY_PATH &&
+    cd /build/CTranslate2/python && pip install --no-build-isolation .
+"
+
+# Save the image
+docker commit ct2-builder nllb-rocm-gpu:latest
+docker rm -f ct2-builder
+```
+
+### 3. Run the Service
 
 ```bash
 docker run -d \
     --privileged \
     --name nllb-translator \
-    -v /root/nllb-translation/models:/models:ro \
-    -v /root/nllb-translation/scripts:/scripts:ro \
+    -v $(pwd)/models:/models:ro \
+    -v $(pwd)/scripts:/scripts:ro \
+    -v $(pwd)/data:/data \
     -e HSA_OVERRIDE_GFX_VERSION=10.3.0 \
     -e MODEL_PATH=/models/nllb-200-3.3B-ct2-int8 \
+    -e DB_PATH=/data/tokens.db \
+    -e ADMIN_TOKEN=your-secure-admin-token \
     -e LD_LIBRARY_PATH=/usr/local/lib:/opt/rocm/lib \
     --device /dev/kfd:/dev/kfd \
     --device /dev/dri:/dev/dri \
@@ -56,35 +117,31 @@ docker run -d \
     python /scripts/translate.py
 ```
 
-### Verify GPU Usage
+### 4. Verify GPU Usage
 
 ```bash
+# Check logs
 docker logs nllb-translator
+
+# Expected output:
+# GPU detected via PyTorch: AMD Radeon RX 6600
+# Model loaded successfully on cuda!
 ```
 
-Expected output:
-```
-GPU detected via PyTorch: AMD Radeon RX 6600
-Loading model from /models/nllb-200-3.3B-ct2-int8
-Attempting device: cuda, Compute type: int8_float16
-Model loaded successfully on cuda!
-Starting translation server on port 5000...
-```
+## API Usage
 
-## API Documentation
+### Documentation
 
 - **Swagger UI**: http://localhost:5000/docs
 - **ReDoc**: http://localhost:5000/redoc
 
-## Authentication
+### Authentication
 
-The API uses Bearer token authentication. Tokens are managed via admin endpoints.
-
-### 1. Create an API Token (Admin)
+1. **Create an API token** (using admin token):
 
 ```bash
 curl -X POST http://localhost:5000/admin/tokens \
-  -H "Authorization: Bearer admin-secret-change-me" \
+  -H "Authorization: Bearer your-secure-admin-token" \
   -H "Content-Type: application/json" \
   -d '{"name": "my-app", "description": "My application"}'
 ```
@@ -94,18 +151,16 @@ Response:
 {
   "id": 1,
   "name": "my-app",
-  "token": "M3ICbxQKJHodmZDX0cBdk9hdxC1RzUfaQZq7oyaCYcM",
-  "description": "My application",
-  "created_at": "2026-02-02 19:39:13",
+  "token": "generated-api-token-here",
   "is_active": true
 }
 ```
 
-### 2. Use Token to Translate
+2. **Translate text** (using API token):
 
 ```bash
 curl -X POST http://localhost:5000/translate \
-  -H "Authorization: Bearer YOUR_TOKEN_HERE" \
+  -H "Authorization: Bearer generated-api-token-here" \
   -H "Content-Type: application/json" \
   -d '{
     "text": "Hello, how are you today?",
@@ -124,180 +179,109 @@ Response:
 }
 ```
 
-### Admin Endpoints
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/admin/tokens` | POST | Create new token |
-| `/admin/tokens` | GET | List all tokens |
-| `/admin/tokens/{id}` | DELETE | Deactivate token |
-| `/admin/tokens/{id}/activate` | POST | Reactivate token |
-
-### Public Endpoints
+### Endpoints
 
 | Endpoint | Method | Auth | Description |
 |----------|--------|------|-------------|
-| `/health` | GET | No | Health check |
-| `/languages` | GET | No | List language codes |
-| `/translate` | POST | Yes | Translate text |
-
-### Health Check
-
-```bash
-curl http://localhost:5000/health
-```
-
-Response:
-```json
-{
-  "status": "ok",
-  "device": "cuda"
-}
-```
-
-### List Supported Languages
-
-```bash
-curl http://localhost:5000/languages
-```
+| `/translate` | POST | Token | Translate text |
+| `/health` | GET | None | Health check |
+| `/languages` | GET | None | List language codes |
+| `/docs` | GET | None | Swagger UI |
+| `/admin/tokens` | POST | Admin | Create token |
+| `/admin/tokens` | GET | Admin | List tokens |
+| `/admin/tokens/{id}` | DELETE | Admin | Deactivate token |
 
 ## Language Codes
 
-NLLB uses BCP-47-like language codes. Common examples:
+NLLB uses BCP-47-like codes. Common examples:
 
-| Code | Language |
-|------|----------|
-| `eng_Latn` | English |
-| `ukr_Cyrl` | Ukrainian |
-| `rus_Cyrl` | Russian |
-| `deu_Latn` | German |
-| `fra_Latn` | French |
-| `spa_Latn` | Spanish |
-| `ita_Latn` | Italian |
-| `pol_Latn` | Polish |
-| `por_Latn` | Portuguese |
-| `nld_Latn` | Dutch |
-| `zho_Hans` | Chinese (Simplified) |
-| `jpn_Jpan` | Japanese |
-| `kor_Hang` | Korean |
-| `ara_Arab` | Arabic |
-| `tur_Latn` | Turkish |
+| Code | Language | Code | Language |
+|------|----------|------|----------|
+| `eng_Latn` | English | `zho_Hans` | Chinese (Simplified) |
+| `ukr_Cyrl` | Ukrainian | `jpn_Jpan` | Japanese |
+| `rus_Cyrl` | Russian | `kor_Hang` | Korean |
+| `deu_Latn` | German | `ara_Arab` | Arabic |
+| `fra_Latn` | French | `hin_Deva` | Hindi |
+| `spa_Latn` | Spanish | `por_Latn` | Portuguese |
 
-Full list: [NLLB Language Codes](https://github.com/facebookresearch/flores/blob/main/flores200/README.md#languages-in-flores-200)
+Full list: [FLORES-200 Languages](https://github.com/facebookresearch/flores/blob/main/flores200/README.md)
 
-## CLI Mode
+## Configuration
 
-You can also use the script directly for one-off translations:
+### Environment Variables
 
-```bash
-docker exec nllb-translator bash -c \
-  "export LD_LIBRARY_PATH=/usr/local/lib:\$LD_LIBRARY_PATH && \
-   SOURCE_LANG=eng_Latn TARGET_LANG=deu_Latn \
-   python /scripts/translate.py 'Hello world'"
-```
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MODEL_PATH` | `/models/nllb-200-3.3B-ct2-int8` | Path to model |
+| `DB_PATH` | `/data/tokens.db` | SQLite database path |
+| `ADMIN_TOKEN` | `admin-secret-change-me` | Admin authentication token |
+| `HSA_OVERRIDE_GFX_VERSION` | - | GPU architecture override |
+
+### GPU Architecture Override
+
+For RX 6600 (gfx1032), set `HSA_OVERRIDE_GFX_VERSION=10.3.0` to emulate gfx1030.
 
 ## Project Structure
 
 ```
-nllb-translation/
-├── models/
-│   └── nllb-200-3.3B-ct2-int8/    # Model files (3.2GB)
-│       ├── model.bin              # Quantized weights
-│       ├── config.json
-│       ├── tokenizer.json
-│       ├── shared_vocabulary.json
-│       └── ...
+nllb-rocm/
+├── models/                     # Model files (not in git)
+│   └── nllb-200-3.3B-ct2-int8/
 ├── scripts/
-│   └── translate.py               # Translation service
-├── ct2_rocm.patch                 # ROCm patch for CTranslate2
+│   └── translate.py            # FastAPI application
+├── data/                       # Token database (not in git)
+├── ct2_rocm.patch              # ROCm patch for CTranslate2
+├── Dockerfile.rocm-build       # Build instructions
 ├── docker-compose.yml
-├── Dockerfile
-├── Dockerfile.rocm-build          # Build from source
 └── README.md
 ```
 
-## Building from Source
+## Why This Project?
 
-If you need to rebuild CTranslate2 with ROCm support:
+The standard `pip install ctranslate2` only supports **NVIDIA CUDA**. This project provides:
 
-```bash
-# Start build container
-docker run -d --privileged --name ct2-builder \
-    -v /root/nllb-translation:/workspace \
-    rocm/pytorch:rocm6.2.3_ubuntu22.04_py3.10_pytorch_release_2.3.0 \
-    sleep infinity
-
-# Install dependencies
-docker exec ct2-builder apt-get update
-docker exec ct2-builder apt-get install -y git cmake ninja-build
-
-# Clone and patch CTranslate2
-docker exec ct2-builder bash -c "
-    cd /build && \
-    git clone --recursive https://github.com/OpenNMT/CTranslate2.git && \
-    cd CTranslate2 && \
-    git checkout v3.23.0 && \
-    cp /workspace/ct2_rocm.patch . && \
-    git apply ct2_rocm.patch
-"
-
-# Build with ROCm (gfx1030 for RX 6600)
-docker exec ct2-builder bash -c "
-    cd /build/CTranslate2 && \
-    mkdir build && cd build && \
-    cmake .. \
-        -DCMAKE_BUILD_TYPE=Release \
-        -DWITH_CUDA=ON \
-        -DGPU_RUNTIME=HIP \
-        -DWITH_CUDNN=ON \
-        -DCMAKE_HIP_ARCHITECTURES='gfx1030' \
-        -DWITH_MKL=OFF \
-        -DOPENMP_RUNTIME=COMP \
-        -GNinja && \
-    ninja -j\$(nproc) && \
-    ninja install
-"
-
-# Build Python bindings
-docker exec ct2-builder bash -c "
-    export LD_LIBRARY_PATH=/usr/local/lib:\$LD_LIBRARY_PATH && \
-    export LIBRARY_PATH=/usr/local/lib:\$LIBRARY_PATH && \
-    cd /build/CTranslate2/python && \
-    pip install --no-build-isolation .
-"
-
-# Commit the image
-docker commit ct2-builder nllb-rocm-gpu:latest
-```
-
-## GPU Architecture Notes
-
-For AMD RX 6600 (gfx1032/RDNA2), use:
-- `HSA_OVERRIDE_GFX_VERSION=10.3.0` to emulate gfx1030
-- Build CTranslate2 with `-DCMAKE_HIP_ARCHITECTURES="gfx1030"`
+1. **ROCm Patch** - Enables CTranslate2 on AMD GPUs
+2. **Complete Setup** - Docker image with everything pre-configured
+3. **Production Ready** - Auth, docs, and proper error handling
 
 ## Performance
 
-- Model loading: ~10-15 seconds
-- Translation latency: ~0.5-2 seconds (depends on text length)
-- Memory usage: ~3.5GB GPU memory
+| Metric | Value |
+|--------|-------|
+| Model Loading | ~10-15 seconds |
+| Translation Latency | ~0.5-2 seconds |
+| GPU Memory Usage | ~3.5GB |
+| Concurrent Requests | Queued (thread-safe) |
 
 ## Troubleshooting
 
 ### GPU not detected
-- Ensure `/dev/kfd` and `/dev/dri` are passed to the container
-- Check `HSA_OVERRIDE_GFX_VERSION` is set correctly for your GPU
-- Verify ROCm is working: `rocm-smi` on host
+- Ensure `/dev/kfd` and `/dev/dri` are passed to container
+- Check `HSA_OVERRIDE_GFX_VERSION` matches your GPU
+- Verify ROCm works on host: `rocm-smi`
 
-### Falls back to CPU
-- Check `LD_LIBRARY_PATH` includes `/usr/local/lib`
-- Verify CTranslate2 was built with ROCm support
+### "CUDA driver version insufficient"
+- This means CTranslate2 pip package (NVIDIA only) is installed
+- Rebuild with the ROCm patch as shown above
 
 ### AppArmor permission denied
-- Use `--privileged` flag or configure AppArmor profiles
+- Use `--privileged` flag or configure AppArmor
 
 ## License
 
-- NLLB-200 model: CC-BY-NC 4.0 (Meta AI)
-- CTranslate2: MIT License
-- This project: MIT License
+- **This project**: MIT License
+- **NLLB-200 model**: CC-BY-NC 4.0 (Meta AI)
+- **CTranslate2**: MIT License (OpenNMT)
+
+## Contributing
+
+Contributions welcome! Especially:
+- Testing on other AMD GPUs (RX 7000 series, etc.)
+- Performance optimizations
+- Additional language support
+
+## Acknowledgments
+
+- [Meta AI](https://ai.meta.com/) for NLLB-200 model
+- [OpenNMT](https://opennmt.net/) for CTranslate2
+- [ROCm](https://rocm.docs.amd.com/) for AMD GPU compute platform
