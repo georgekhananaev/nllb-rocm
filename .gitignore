@@ -3,6 +3,9 @@ models/
 *.bin
 *.safetensors
 
+# Data (tokens database)
+data/
+
 # Python
 __pycache__/
 *.py[cod]

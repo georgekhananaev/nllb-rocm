@@ -2,6 +2,14 @@
 
 A self-hosted multilingual translation service using Meta's NLLB-200 model running on AMD GPUs via ROCm.
 
+## Features
+
+- **FastAPI** with automatic Swagger UI documentation
+- **Token-based authentication** with SQLite database
+- **GPU acceleration** on AMD GPUs via ROCm
+- **200+ language** support via NLLB-200 model
+- **Thread-safe** parallel request handling
+
 ## Overview
 
 This project runs the **NLLB-200-3.3B-ct2-int8** model (No Language Left Behind) on an AMD RX 6600 GPU using CTranslate2 compiled with ROCm support. The model supports translation between 200+ languages.
@@ -12,7 +20,7 @@ This project runs the **NLLB-200-3.3B-ct2-int8** model (No Language Left Behind)
 - **Parameters**: 3.3 billion (quantized to int8)
 - **Size**: ~3.2GB on disk
 - **Quantization**: int8 (CPU) / int8_float16 (GPU)
-- **Framework**: CTranslate2 with ROCm/HIP backend
+- **Framework**: CTranslate2 with ROCm/HIP backend, FastAPI
 
 ### Why Custom Build?
 
@@ -63,12 +71,41 @@ Model loaded successfully on cuda!
 Starting translation server on port 5000...
 ```
 
-## API Usage
+## API Documentation
 
-### Translate Text
+- **Swagger UI**: http://localhost:5000/docs
+- **ReDoc**: http://localhost:5000/redoc
+
+## Authentication
+
+The API uses Bearer token authentication. Tokens are managed via admin endpoints.
+
+### 1. Create an API Token (Admin)
+
+```bash
+curl -X POST http://localhost:5000/admin/tokens \
+  -H "Authorization: Bearer admin-secret-change-me" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "my-app", "description": "My application"}'
+```
+
+Response:
+```json
+{
+  "id": 1,
+  "name": "my-app",
+  "token": "M3ICbxQKJHodmZDX0cBdk9hdxC1RzUfaQZq7oyaCYcM",
+  "description": "My application",
+  "created_at": "2026-02-02 19:39:13",
+  "is_active": true
+}
+```
+
+### 2. Use Token to Translate
 
 ```bash
 curl -X POST http://localhost:5000/translate \
+  -H "Authorization: Bearer YOUR_TOKEN_HERE" \
   -H "Content-Type: application/json" \
   -d '{
     "text": "Hello, how are you today?",
@@ -86,6 +123,23 @@ Response:
   "device": "cuda"
 }
 ```
+
+### Admin Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/admin/tokens` | POST | Create new token |
+| `/admin/tokens` | GET | List all tokens |
+| `/admin/tokens/{id}` | DELETE | Deactivate token |
+| `/admin/tokens/{id}/activate` | POST | Reactivate token |
+
+### Public Endpoints
+
+| Endpoint | Method | Auth | Description |
+|----------|--------|------|-------------|
+| `/health` | GET | No | Health check |
+| `/languages` | GET | No | List language codes |
+| `/translate` | POST | Yes | Translate text |
 
 ### Health Check
 
