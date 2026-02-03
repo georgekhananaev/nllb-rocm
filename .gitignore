@@ -8,6 +8,16 @@ models/
 data/
 *.db
 
+# Secrets & Environment
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+id_rsa*
+secrets.*
+credentials.*
+
 # Python
 __pycache__/
 *.py[cod]
@@ -17,7 +27,6 @@ __pycache__/
 venv/
 .venv/
 env/
-.env
 
 # Build artifacts
 build/
@@ -30,6 +39,7 @@ dist/
 # IDE
 .idea/
 .vscode/
+.claude/
 *.swp
 *.swo
 *~

@@ -46,8 +46,12 @@ A self-hosted multilingual translation API using Meta's **NLLB-200** model, opti
 ### 1. Clone and Download Model
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/nllb-rocm.git
+git clone https://github.com/yourusername/nllb-rocm.git
 cd nllb-rocm
+
+# Copy and configure environment
+cp .env.example .env
+# Edit .env and set a secure ADMIN_TOKEN
 
 # Create directories
 mkdir -p models data
@@ -97,6 +101,15 @@ docker rm -f ct2-builder
 ```
 
 ### 3. Run the Service
+
+**Option A: Using Docker Compose (recommended)**
+
+```bash
+# Edit .env with your ADMIN_TOKEN first
+docker-compose up -d
+```
+
+**Option B: Using Docker directly**
 
 ```bash
 docker run -d \
@@ -214,8 +227,14 @@ Full list: [FLORES-200 Languages](https://github.com/facebookresearch/flores/blo
 |----------|---------|-------------|
 | `MODEL_PATH` | `/models/nllb-200-3.3B-ct2-int8` | Path to model |
 | `DB_PATH` | `/data/tokens.db` | SQLite database path |
-| `ADMIN_TOKEN` | `admin-secret-change-me` | Admin authentication token |
+| `ADMIN_TOKEN` | `admin-secret-change-me` | Admin authentication token (**change this!**) |
 | `HSA_OVERRIDE_GFX_VERSION` | - | GPU architecture override |
+| `BATCH_TIMEOUT_MS` | `50` | Max wait time (ms) for batch to fill |
+| `MAX_BATCH_SIZE` | `8` | Maximum requests per batch |
+| `BEAM_SIZE` | `1` | Beam size (1=fast, 4=quality) |
+| `INTER_THREADS` | `2` | Number of HIP/CUDA streams |
+
+See `.env.example` for a complete list with descriptions.
 
 ### GPU Architecture Override
 
@@ -228,11 +247,14 @@ nllb-rocm/
 ├── models/                     # Model files (not in git)
 │   └── nllb-200-3.3B-ct2-int8/
 ├── scripts/
-│   └── translate.py            # FastAPI application
+│   ├── translate.py            # FastAPI application (main)
+│   ├── benchmark.py            # Performance benchmarking
+│   └── test_translate.py       # Basic translation test
 ├── data/                       # Token database (not in git)
 ├── ct2_rocm.patch              # ROCm patch for CTranslate2
+├── docker-compose.yml          # Docker Compose config
 ├── Dockerfile.rocm-build       # Build instructions
-├── docker-compose.yml
+├── .env.example                # Environment variables template
 └── README.md
 ```
 
