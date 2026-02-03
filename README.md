@@ -1,6 +1,6 @@
 # NLLB Translation API for AMD GPUs (ROCm)
 
-A self-hosted multilingual translation API using Meta's **NLLB-200** model, optimized for **AMD GPUs** via ROCm. Includes FastAPI with Swagger UI and token-based authentication.
+A production-grade, self-hosted multilingual translation API using Meta's **NLLB-200** model, optimized for **AMD GPUs** via ROCm. Features FastAPI with Swagger UI, token-based authentication, translation caching, rate limiting, circuit breaker protection, and comprehensive monitoring.
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/georgekhananaev/nllb-rocm/blob/master/LICENSE)
 [![Python](https://img.shields.io/badge/python-3.10+-green.svg)](https://www.python.org/)
@@ -9,14 +9,29 @@ A self-hosted multilingual translation API using Meta's **NLLB-200** model, opti
 
 ## Features
 
+### Core Features
 - **AMD GPU Acceleration** - Runs on AMD GPUs using ROCm (not just NVIDIA!)
 - **200+ Languages** - Full NLLB-200 model support with all 202 languages
 - **FastAPI + Swagger UI** - Interactive API documentation at `/docs`
 - **Token Authentication** - Secure API access with Bearer tokens
 - **SQLite Token Management** - Create, list, and revoke API tokens
+
+### Production Features (v3.0)
+- **Translation Caching** - Dragonfly/Redis cache for 150x faster repeated translations
+- **Rate Limiting** - Per-token request limits with automatic cleanup
+- **Circuit Breaker** - GPU failure protection with automatic recovery
+- **Prometheus Metrics** - Full observability at `/metrics`
+- **Quality Levels** - Choose between fast, balanced, or best quality
+- **Request Tracing** - X-Request-ID and X-Response-Time headers
+- **Health Probes** - Kubernetes-ready liveness and readiness endpoints
+
+### Performance Optimizations
 - **Adaptive Batching** - Dynamic batch processing for optimal throughput
+- **uvloop** - Faster async event loop (when available)
+- **orjson** - Faster JSON serialization (when available)
+- **Structured Logging** - JSON logs with structlog (when available)
 - **Thread-safe** - Handles concurrent requests properly
-- **Docker Ready** - Complete containerized setup
+- **Memory Efficient** - No memory leaks, periodic cleanup of rate limit data
 
 ## Supported Hardware
 
@@ -24,7 +39,7 @@ A self-hosted multilingual translation API using Meta's **NLLB-200** model, opti
 
 | GPU | Architecture | VRAM | Status |
 |-----|--------------|------|--------|
-| AMD Radeon RX 6600 | RDNA2 (gfx1032) | 8GB | ✅ Tested & Working |
+| AMD Radeon RX 6600 | RDNA2 (gfx1032) | 8GB | Tested & Working |
 
 ### Should Work (Untested)
 
@@ -40,7 +55,7 @@ A self-hosted multilingual translation API using Meta's **NLLB-200** model, opti
 - **ROCm 6.x** compatible AMD GPU
 - **Docker** with GPU passthrough
 - **8GB+ VRAM** recommended for 3.3B model
-- **~4GB RAM** for model loading
+- **~2.5GB RAM** for service (model + runtime)
 - **~60GB disk** for Docker image
 
 ## Quick Start
@@ -82,7 +97,8 @@ docker run -d --privileged --name ct2-builder \
 # Install dependencies and build (takes ~10-15 minutes)
 docker exec ct2-builder bash -c "
     apt-get update && apt-get install -y git cmake ninja-build &&
-    pip install transformers sentencepiece flask tokenizers pybind11 fastapi uvicorn &&
+    pip install transformers sentencepiece flask tokenizers pybind11 fastapi uvicorn \
+        uvloop orjson structlog prometheus-client redis pysbd &&
     cd /build &&
     git clone --recursive https://github.com/OpenNMT/CTranslate2.git &&
     cd CTranslate2 && git checkout v3.23.0 &&
@@ -104,14 +120,16 @@ docker rm -f ct2-builder
 
 ### 3. Run the Service
 
-**Option A: Using Docker Compose (recommended)**
+**Using Docker Compose (recommended)**
 
 ```bash
 # Edit .env with your ADMIN_TOKEN first
 docker-compose up -d
 ```
 
-**Option B: Using Docker directly**
+This starts both the translation service and Dragonfly cache.
+
+**Using Docker directly (without cache)**
 
 ```bash
 docker run -d \
@@ -124,6 +142,7 @@ docker run -d \
     -e MODEL_PATH=/models/nllb-200-3.3B-ct2-int8 \
     -e DB_PATH=/data/tokens.db \
     -e ADMIN_TOKEN=your-secure-admin-token \
+    -e CACHE_ENABLED=false \
     -e LD_LIBRARY_PATH=/usr/local/lib:/opt/rocm/lib \
     --device /dev/kfd:/dev/kfd \
     --device /dev/dri:/dev/dri \
@@ -141,6 +160,7 @@ docker logs nllb-translator
 # Expected output:
 # GPU detected via PyTorch: AMD Radeon RX 6600
 # Model loaded successfully on cuda!
+# Connected to cache: redis://dragonfly:6379/0
 ```
 
 ## API Usage
@@ -149,6 +169,7 @@ docker logs nllb-translator
 
 - **Swagger UI**: http://localhost:5000/docs
 - **ReDoc**: http://localhost:5000/redoc
+- **Metrics**: http://localhost:5000/metrics
 
 ### Authentication
 
@@ -180,7 +201,8 @@ curl -X POST http://localhost:5000/translate \
   -d '{
     "text": "Hello, how are you today?",
     "source_lang": "eng_Latn",
-    "target_lang": "ukr_Cyrl"
+    "target_lang": "ukr_Cyrl",
+    "quality": "fast"
   }'
 ```
 
@@ -190,21 +212,290 @@ Response:
   "translation": "Привіт, як ти сьогодні?",
   "source_lang": "eng_Latn",
   "target_lang": "ukr_Cyrl",
-  "device": "AMD Radeon RX 6600"
+  "device": "AMD Radeon RX 6600",
+  "cached": false,
+  "quality": "fast"
 }
 ```
 
-### Endpoints
+### Quality Levels
+
+| Level | Beam Size | Latency | Use Case |
+|-------|-----------|---------|----------|
+| `fast` | 1 | ~0.5-1s | Real-time translation, chatbots |
+| `balanced` | 4 | ~1-1.5s | Good quality/speed tradeoff |
+| `best` | 8 | ~1.5-2s | Publishing, official documents |
+
+### API Endpoints
+
+#### Translation
 
 | Endpoint | Method | Auth | Description |
 |----------|--------|------|-------------|
 | `/translate` | POST | Token | Translate text |
-| `/health` | GET | None | Health check |
-| `/languages` | GET | None | List language codes |
+| `/languages` | GET | None | List all 202 language codes |
+
+#### Health & Monitoring
+
+| Endpoint | Method | Auth | Description |
+|----------|--------|------|-------------|
+| `/health` | GET | None | Legacy health check |
+| `/health/live` | GET | None | Kubernetes liveness probe |
+| `/health/ready` | GET | None | Kubernetes readiness probe |
+| `/health/info` | GET | None | Feature status (uvloop, cache, etc.) |
+| `/metrics` | GET | None | Prometheus metrics |
 | `/docs` | GET | None | Swagger UI |
-| `/admin/tokens` | POST | Admin | Create token |
-| `/admin/tokens` | GET | Admin | List tokens |
+| `/redoc` | GET | None | ReDoc documentation |
+
+#### Token Management (Admin)
+
+| Endpoint | Method | Auth | Description |
+|----------|--------|------|-------------|
+| `/admin/tokens` | POST | Admin | Create new API token |
+| `/admin/tokens` | GET | Admin | List all tokens |
 | `/admin/tokens/{id}` | DELETE | Admin | Deactivate token |
+| `/admin/tokens/{id}/activate` | POST | Admin | Reactivate token |
+
+#### Cache Management (Admin)
+
+| Endpoint | Method | Auth | Description |
+|----------|--------|------|-------------|
+| `/admin/cache` | DELETE | Admin | Clear all cached translations |
+| `/admin/cache/stats` | GET | Admin | Cache statistics (keys, memory) |
+
+#### Circuit Breaker (Admin)
+
+| Endpoint | Method | Auth | Description |
+|----------|--------|------|-------------|
+| `/admin/circuit-breaker/status` | GET | Admin | Current state and failure count |
+| `/admin/circuit-breaker/test` | POST | Admin | Simulate failures (testing) |
+| `/admin/circuit-breaker/reset` | POST | Admin | Reset to closed state |
+
+## Configuration
+
+### Environment Variables
+
+#### Security
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ADMIN_TOKEN` | `admin-secret-change-me` | Admin authentication token (**change this!**) |
+
+#### Paths
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MODEL_PATH` | `/models/nllb-200-3.3B-ct2-int8` | Path to model |
+| `DB_PATH` | `/data/tokens.db` | SQLite database path |
+
+#### Performance
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `BATCH_TIMEOUT_MS` | `50` | Max wait time (ms) for batch to fill |
+| `MAX_BATCH_SIZE` | `8` | Maximum requests per batch |
+| `BEAM_SIZE` | `1` | Default beam size (1=fast, 4=balanced, 8=best) |
+| `INTER_THREADS` | `2` | Number of HIP/CUDA streams |
+| `MIN_BATCH_WAIT_MS` | `5` | Min wait before checking queue |
+| `MAX_QUEUE_SIZE` | `1000` | Max queue size before rejecting (503) |
+
+#### Cache (Dragonfly/Redis)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CACHE_ENABLED` | `true` | Enable/disable caching |
+| `CACHE_TTL_SECONDS` | `3600` | Cache TTL (1 hour default) |
+| `REDIS_URL` | `redis://localhost:6379/0` | Redis/Dragonfly URL |
+
+#### Rate Limiting
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `RATE_LIMIT_ENABLED` | `true` | Enable/disable rate limiting |
+| `RATE_LIMIT_REQUESTS` | `100` | Max requests per window |
+| `RATE_LIMIT_WINDOW_SECONDS` | `60` | Rate limit window |
+
+#### Circuit Breaker
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CIRCUIT_BREAKER_ENABLED` | `true` | Enable/disable circuit breaker |
+| `CIRCUIT_BREAKER_THRESHOLD` | `5` | Consecutive failures to open |
+| `CIRCUIT_BREAKER_TIMEOUT` | `30` | Seconds before half-open |
+
+#### GPU Settings
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `HSA_OVERRIDE_GFX_VERSION` | - | GPU architecture override |
+| `ROCR_VISIBLE_DEVICES` | `0` | GPU device index |
+
+### Disabling Features
+
+```bash
+# Disable caching (useful for testing)
+CACHE_ENABLED=false
+
+# Disable rate limiting
+RATE_LIMIT_ENABLED=false
+
+# Disable circuit breaker
+CIRCUIT_BREAKER_ENABLED=false
+```
+
+### Optional Dependencies
+
+Install these for additional features:
+
+```bash
+pip install uvloop orjson structlog prometheus-client redis pysbd
+```
+
+| Package | Feature |
+|---------|---------|
+| `uvloop` | Faster async event loop (~10-20% speedup) |
+| `orjson` | Faster JSON serialization |
+| `structlog` | Structured JSON logging |
+| `prometheus-client` | Prometheus metrics at `/metrics` |
+| `redis` | Redis/Dragonfly cache support |
+| `pysbd` | Better sentence segmentation |
+
+## How It Works
+
+### Circuit Breaker Pattern
+
+The circuit breaker protects against cascading failures when the GPU encounters errors:
+
+```
+       ┌─────────────────────────────────────────────────────────┐
+       │                                                         │
+       ▼                                                         │
+   ┌────────┐  5 failures   ┌────────┐  30s timeout  ┌──────────┐
+   │ CLOSED │──────────────▶│  OPEN  │──────────────▶│HALF-OPEN │
+   │        │               │        │               │          │
+   └────────┘               └────────┘               └──────────┘
+       ▲                                                  │
+       │                    success                       │
+       └──────────────────────────────────────────────────┘
+                            failure → back to OPEN
+```
+
+| State | Behavior |
+|-------|----------|
+| **CLOSED** | Normal operation, requests pass through |
+| **OPEN** | All requests immediately return 503 |
+| **HALF-OPEN** | One test request allowed; success closes, failure reopens |
+
+### Caching Flow
+
+```
+Request → Check Cache → HIT? → Return cached (5ms)
+                     ↓
+                    MISS
+                     ↓
+              GPU Translation (~1s)
+                     ↓
+              Store in Cache
+                     ↓
+              Return response
+```
+
+Cache provides **150x speedup** for repeated translations.
+
+### Rate Limiting
+
+- Per-token sliding window rate limiting
+- Automatic cleanup of inactive tokens (every 5 minutes)
+- Returns 429 Too Many Requests when exceeded
+
+## Monitoring
+
+### Prometheus Metrics
+
+Available at `/metrics`:
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `translation_requests_total` | Counter | status, source_lang, target_lang, cached | Total requests |
+| `translation_latency_seconds` | Histogram | source_lang, target_lang, quality | Request latency |
+| `batch_size` | Histogram | - | Batch sizes processed |
+| `translation_queue_depth` | Gauge | - | Current queue depth |
+| `cache_hits_total` | Counter | - | Cache hits |
+| `cache_misses_total` | Counter | - | Cache misses |
+| `rate_limit_exceeded_total` | Counter | token_name | Rate limit exceeded events |
+| `circuit_breaker_state` | Gauge | - | 0=closed, 1=open, 2=half-open |
+
+### Health Endpoints
+
+```bash
+# Liveness probe (is the process running?)
+curl http://localhost:5000/health/live
+# {"status": "alive"}
+
+# Readiness probe (can it accept traffic?)
+curl http://localhost:5000/health/ready
+# {"status": "ready", "model_loaded": true, "cache_connected": true,
+#  "queue_size": 0, "circuit_breaker": "closed"}
+
+# Feature info (what's enabled?)
+curl http://localhost:5000/health/info
+# {"uvloop_enabled": true, "orjson_enabled": true, "cache_enabled": true,
+#  "cache_connected": true, "rate_limit_enabled": true, ...}
+```
+
+## Architecture
+
+```
+                    ┌─────────────────┐
+                    │   Client App    │
+                    └────────┬────────┘
+                             │
+                             ▼
+                    ┌─────────────────┐
+                    │   FastAPI       │
+                    │   (uvloop)      │
+                    └────────┬────────┘
+                             │
+        ┌────────────────────┼────────────────────┐
+        ▼                    ▼                    ▼
+┌───────────────┐   ┌───────────────┐   ┌───────────────┐
+│ Rate Limiter  │   │ Circuit       │   │ Cache Check   │
+│ (per token)   │   │ Breaker       │   │ (Dragonfly)   │
+└───────┬───────┘   └───────┬───────┘   └───────┬───────┘
+        │                   │                   │
+        └───────────────────┼───────────────────┘
+                            │
+                            ▼
+                    ┌─────────────────┐
+                    │ Batch Queue     │
+                    │ (async)         │
+                    └────────┬────────┘
+                             │
+                             ▼
+                    ┌─────────────────┐
+                    │ Batch Processor │
+                    │ (adaptive)      │
+                    └────────┬────────┘
+                             │
+        ┌────────────────────┼────────────────────┐
+        ▼                    ▼                    ▼
+┌───────────────┐   ┌───────────────┐   ┌───────────────┐
+│ Tokenizer     │   │ CTranslate2   │   │ Decoder       │
+│ (ThreadPool)  │   │ (GPU/ROCm)    │   │ (ThreadPool)  │
+└───────────────┘   └───────────────┘   └───────────────┘
+```
+
+## Performance
+
+| Metric | Value |
+|--------|-------|
+| Model Loading | ~10-15 seconds |
+| Translation (uncached) | ~0.5-1 second |
+| Translation (cached) | ~5ms |
+| Cache Speedup | **150x faster** |
+| GPU Memory | ~3.5GB VRAM |
+| System Memory | ~2.2GB RAM |
+| Memory Leaks | None (tested with 150+ requests) |
 
 ## Language Codes
 
@@ -215,32 +506,11 @@ NLLB uses BCP-47-like codes. Common examples:
 | `eng_Latn` | English | `zho_Hans` | Chinese (Simplified) |
 | `ukr_Cyrl` | Ukrainian | `jpn_Jpan` | Japanese |
 | `rus_Cyrl` | Russian | `kor_Hang` | Korean |
-| `deu_Latn` | German | `ara_Arab` | Arabic |
+| `deu_Latn` | German | `arb_Arab` | Arabic |
 | `fra_Latn` | French | `hin_Deva` | Hindi |
 | `spa_Latn` | Spanish | `por_Latn` | Portuguese |
 
-Full list: [FLORES-200 Languages](https://github.com/facebookresearch/flores/blob/main/flores200/README.md)
-
-## Configuration
-
-### Environment Variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `MODEL_PATH` | `/models/nllb-200-3.3B-ct2-int8` | Path to model |
-| `DB_PATH` | `/data/tokens.db` | SQLite database path |
-| `ADMIN_TOKEN` | `admin-secret-change-me` | Admin authentication token (**change this!**) |
-| `HSA_OVERRIDE_GFX_VERSION` | - | GPU architecture override |
-| `BATCH_TIMEOUT_MS` | `50` | Max wait time (ms) for batch to fill |
-| `MAX_BATCH_SIZE` | `8` | Maximum requests per batch |
-| `BEAM_SIZE` | `1` | Beam size (1=fast, 4=quality) |
-| `INTER_THREADS` | `2` | Number of HIP/CUDA streams |
-
-See `.env.example` for a complete list with descriptions.
-
-### GPU Architecture Override
-
-For RX 6600 (gfx1032), set `HSA_OVERRIDE_GFX_VERSION=10.3.0` to emulate gfx1030.
+Full list: Call `/languages` endpoint or see [FLORES-200 Languages](https://github.com/facebookresearch/flores/blob/main/flores200/README.md)
 
 ## Project Structure
 
@@ -254,29 +524,11 @@ nllb-rocm/
 │   └── test_translate.py       # Basic translation test
 ├── data/                       # Token database (not in git)
 ├── ct2_rocm.patch              # ROCm patch for CTranslate2
-├── docker-compose.yml          # Docker Compose config
+├── docker-compose.yml          # Docker Compose (translator + cache)
 ├── Dockerfile.rocm-build       # Build instructions
 ├── .env.example                # Environment variables template
 └── README.md
 ```
-
-## Why This Project?
-
-The standard `pip install ctranslate2` only supports **NVIDIA CUDA**. This project provides:
-
-1. **ROCm Patch** - Enables CTranslate2 on AMD GPUs
-2. **Complete Setup** - Docker image with everything pre-configured
-3. **Production Ready** - Auth, docs, and proper error handling
-
-## Performance
-
-| Metric | Value |
-|--------|-------|
-| Model Loading | ~10-15 seconds |
-| Translation Latency | ~0.3-1 second (single request) |
-| GPU Memory Usage | ~3.5GB |
-| Throughput | Optimized with adaptive batching |
-| Concurrent Requests | Batched & queued (thread-safe) |
 
 ## Troubleshooting
 
@@ -289,8 +541,25 @@ The standard `pip install ctranslate2` only supports **NVIDIA CUDA**. This proje
 - This means CTranslate2 pip package (NVIDIA only) is installed
 - Rebuild with the ROCm patch as shown above
 
-### AppArmor permission denied
-- Use `--privileged` flag or configure AppArmor
+### Cache not connecting
+- Ensure Dragonfly container is running: `docker ps`
+- Check network: containers must be on same Docker network
+- Verify `CACHE_ENABLED=true` in environment
+- Check `/health/info` for `cache_connected` status
+
+### Rate limit errors (429)
+- Increase `RATE_LIMIT_REQUESTS` or `RATE_LIMIT_WINDOW_SECONDS`
+- Or disable: `RATE_LIMIT_ENABLED=false`
+
+### Circuit breaker open (503)
+- Check `/admin/circuit-breaker/status` for failure count
+- Reset with `/admin/circuit-breaker/reset`
+- Investigate GPU errors in logs
+
+### High memory usage
+- Normal: ~2.2GB for service, ~3.5GB VRAM
+- If growing: Check for many unique translations (cache grows)
+- Clear cache: `DELETE /admin/cache`
 
 ## License
 
@@ -310,3 +579,4 @@ Contributions welcome! Especially:
 - [Meta AI](https://ai.meta.com/) for NLLB-200 model
 - [OpenNMT](https://opennmt.net/) for CTranslate2
 - [ROCm](https://rocm.docs.amd.com/) for AMD GPU compute platform
+- [DragonflyDB](https://www.dragonflydb.io/) for high-performance caching

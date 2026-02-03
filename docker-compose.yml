@@ -16,11 +16,25 @@ services:
       - ADMIN_TOKEN=${ADMIN_TOKEN:-admin-secret-change-me}
       - ROCR_VISIBLE_DEVICES=0
       - LD_LIBRARY_PATH=/usr/local/lib:/opt/rocm/lib
-      # Performance tuning (can be adjusted)
+      # Performance tuning
       - BATCH_TIMEOUT_MS=${BATCH_TIMEOUT_MS:-50}
       - MAX_BATCH_SIZE=${MAX_BATCH_SIZE:-8}
       - BEAM_SIZE=${BEAM_SIZE:-1}
       - INTER_THREADS=${INTER_THREADS:-2}
+      - MIN_BATCH_WAIT_MS=${MIN_BATCH_WAIT_MS:-5}
+      - MAX_QUEUE_SIZE=${MAX_QUEUE_SIZE:-1000}
+      # Cache configuration (Dragonfly/Redis)
+      - CACHE_ENABLED=${CACHE_ENABLED:-true}
+      - CACHE_TTL_SECONDS=${CACHE_TTL_SECONDS:-3600}
+      - REDIS_URL=redis://dragonfly:6379/0
+      # Rate limiting
+      - RATE_LIMIT_ENABLED=${RATE_LIMIT_ENABLED:-true}
+      - RATE_LIMIT_REQUESTS=${RATE_LIMIT_REQUESTS:-100}
+      - RATE_LIMIT_WINDOW_SECONDS=${RATE_LIMIT_WINDOW_SECONDS:-60}
+      # Circuit breaker
+      - CIRCUIT_BREAKER_ENABLED=${CIRCUIT_BREAKER_ENABLED:-true}
+      - CIRCUIT_BREAKER_THRESHOLD=${CIRCUIT_BREAKER_THRESHOLD:-5}
+      - CIRCUIT_BREAKER_TIMEOUT=${CIRCUIT_BREAKER_TIMEOUT:-30}
     devices:
       - /dev/kfd:/dev/kfd
       - /dev/dri:/dev/dri
@@ -35,3 +49,36 @@ services:
       - "5000:5000"
     command: python /scripts/translate.py
     restart: unless-stopped
+    depends_on:
+      dragonfly:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  dragonfly:
+    image: docker.dragonflydb.io/dragonflydb/dragonfly:latest
+    container_name: nllb-cache
+    privileged: true
+    ports:
+      - "6379:6379"
+    command:
+      - --maxmemory=256mb
+      - --proactor_threads=1
+      - --cache_mode=true
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 384M
+        reservations:
+          memory: 256M
