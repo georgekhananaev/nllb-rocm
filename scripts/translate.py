@@ -46,6 +46,7 @@ security = HTTPBearer()
 # Global instances
 translator = None
 device_used = None
+device_name = None  # Human-readable GPU name
 
 # Thread-local storage for tokenizers
 _thread_local = threading.local()
@@ -226,16 +227,16 @@ async def get_admin_token(credentials: HTTPAuthorizationCredentials = Depends(se
 # ============== Model Functions ==============
 
 def get_device():
-    """Try to use GPU, fallback to CPU."""
+    """Try to use GPU, fallback to CPU. Returns (device_type, device_name)."""
     try:
         import torch
         if torch.cuda.is_available():
-            device_name = torch.cuda.get_device_name(0)
-            print(f"GPU detected via PyTorch: {device_name}")
-            return "cuda"
+            gpu_name = torch.cuda.get_device_name(0)
+            print(f"GPU detected via PyTorch: {gpu_name}")
+            return "cuda", gpu_name
     except Exception as e:
         print(f"PyTorch CUDA check failed: {e}")
-    return "cpu"
+    return "cpu", "CPU"
 
 
 def get_tokenizer():
@@ -247,13 +248,13 @@ def get_tokenizer():
 
 def init_model():
     """Initialize the translation model with optimized settings."""
-    global translator, device_used
+    global translator, device_used, device_name
 
-    device = get_device()
+    device, gpu_name = get_device()
     compute_type = "int8" if device == "cpu" else "int8_float16"
 
     print(f"Loading model from {MODEL_PATH}")
-    print(f"Attempting device: {device}, Compute type: {compute_type}")
+    print(f"Attempting device: {device} ({gpu_name}), Compute type: {compute_type}")
     print(f"Optimization settings: beam_size={BEAM_SIZE}, inter_threads={INTER_THREADS}, batch_timeout={BATCH_TIMEOUT_MS}ms")
 
     try:
@@ -265,6 +266,7 @@ def init_model():
             max_queued_batches=-1,  # Unlimited queue for async
         )
         device_used = device
+        device_name = gpu_name
     except Exception as e:
         print(f"Failed to load on {device}: {e}")
         if device != "cpu":
@@ -276,12 +278,13 @@ def init_model():
                 inter_threads=4,  # CPU threads
             )
             device_used = "cpu"
+            device_name = "CPU"
         else:
             raise
 
     # Pre-warm one tokenizer (loads vocab files into memory)
     _ = get_tokenizer()
-    print(f"Model loaded successfully on {device_used}!")
+    print(f"Model loaded successfully on {device_name}!")
     return device_used
 
 
@@ -503,7 +506,7 @@ async def translate_endpoint(
             translation=result,
             source_lang=request.source_lang,
             target_lang=request.target_lang,
-            device=device_used
+            device=device_name
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -515,7 +518,7 @@ async def health():
     queue_size = batch_queue.qsize() if batch_queue else 0
     return HealthResponse(
         status="ok",
-        device=device_used or "not initialized",
+        device=device_name or "not initialized",
         batch_queue_size=queue_size,
         config={
             "beam_size": BEAM_SIZE,
@@ -947,7 +950,7 @@ def main():
 
         result = translate_text(text, source_lang, target_lang)
         print(f"\nResult: {result}")
-        print(f"Device: {device_used}")
+        print(f"Device: {device_name}")
     else:
         # Server mode
         print("Starting NLLB Translation API server (Optimized)...")
