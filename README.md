@@ -2,17 +2,19 @@
 
 A self-hosted multilingual translation API using Meta's **NLLB-200** model, optimized for **AMD GPUs** via ROCm. Includes FastAPI with Swagger UI and token-based authentication.
 
-![License](https://img.shields.io/badge/license-MIT-blue.svg)
-![Python](https://img.shields.io/badge/python-3.10+-green.svg)
-![ROCm](https://img.shields.io/badge/ROCm-6.2-red.svg)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/georgekhananaev/nllb-rocm/blob/master/LICENSE)
+[![Python](https://img.shields.io/badge/python-3.10+-green.svg)](https://www.python.org/)
+[![ROCm](https://img.shields.io/badge/ROCm-6.2-red.svg)](https://rocm.docs.amd.com/)
+[![GitHub stars](https://img.shields.io/github/stars/georgekhananaev/nllb-rocm?style=social)](https://github.com/georgekhananaev/nllb-rocm)
 
 ## Features
 
 - **AMD GPU Acceleration** - Runs on AMD GPUs using ROCm (not just NVIDIA!)
-- **200+ Languages** - Full NLLB-200 model support
+- **200+ Languages** - Full NLLB-200 model support with all 202 languages
 - **FastAPI + Swagger UI** - Interactive API documentation at `/docs`
 - **Token Authentication** - Secure API access with Bearer tokens
 - **SQLite Token Management** - Create, list, and revoke API tokens
+- **Adaptive Batching** - Dynamic batch processing for optimal throughput
 - **Thread-safe** - Handles concurrent requests properly
 - **Docker Ready** - Complete containerized setup
 
@@ -46,7 +48,7 @@ A self-hosted multilingual translation API using Meta's **NLLB-200** model, opti
 ### 1. Clone and Download Model
 
 ```bash
-git clone https://github.com/yourusername/nllb-rocm.git
+git clone https://github.com/georgekhananaev/nllb-rocm.git
 cd nllb-rocm
 
 # Copy and configure environment
@@ -188,7 +190,7 @@ Response:
   "translation": "Привіт, як ти сьогодні?",
   "source_lang": "eng_Latn",
   "target_lang": "ukr_Cyrl",
-  "device": "cuda"
+  "device": "AMD Radeon RX 6600"
 }
 ```
 
@@ -271,9 +273,10 @@ The standard `pip install ctranslate2` only supports **NVIDIA CUDA**. This proje
 | Metric | Value |
 |--------|-------|
 | Model Loading | ~10-15 seconds |
-| Translation Latency | ~0.5-2 seconds |
+| Translation Latency | ~0.3-1 second (single request) |
 | GPU Memory Usage | ~3.5GB |
-| Concurrent Requests | Queued (thread-safe) |
+| Throughput | Optimized with adaptive batching |
+| Concurrent Requests | Batched & queued (thread-safe) |
 
 ## Troubleshooting
 
