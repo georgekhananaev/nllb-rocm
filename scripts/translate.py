@@ -30,6 +30,7 @@ BATCH_TIMEOUT_MS = int(os.environ.get("BATCH_TIMEOUT_MS", "50"))  # Max wait tim
 MAX_BATCH_SIZE = int(os.environ.get("MAX_BATCH_SIZE", "8"))  # Max requests per batch
 BEAM_SIZE = int(os.environ.get("BEAM_SIZE", "1"))  # 1 for speed, 4 for quality
 INTER_THREADS = int(os.environ.get("INTER_THREADS", "2"))  # HIP/CUDA streams
+MIN_BATCH_WAIT_MS = int(os.environ.get("MIN_BATCH_WAIT_MS", "5"))  # Min wait before checking queue again
 
 # FastAPI app
 app = FastAPI(
@@ -316,17 +317,23 @@ def translate_batch_sync(requests: List[BatchRequest]) -> List[str]:
     source_batch = [req.source_tokens for req in requests]
     target_prefixes = [[req.target_lang] for req in requests]
 
+    # Calculate adaptive max_decoding_length based on longest input
+    # Output is typically 1-1.5x input length for translation
+    max_input_len = max(len(tokens) for tokens in source_batch)
+    adaptive_max_length = min(256, max(64, int(max_input_len * 2)))
+
     # Run batch translation with optimized settings
     results = translator.translate_batch(
         source_batch,
         target_prefix=target_prefixes,
         beam_size=BEAM_SIZE,  # 1 for speed, higher for quality
-        max_decoding_length=256,
+        max_decoding_length=adaptive_max_length,
         return_scores=False,  # Skip softmax computation
         max_batch_size=0,  # Process all at once
+        disable_unk=True,  # Faster - no unknown token generation
     )
 
-    # Decode results
+    # Decode results (already fast, no need to parallelize for small batches)
     translations = []
     for i, result in enumerate(results):
         output_tokens = result.hypotheses[0]
@@ -393,22 +400,32 @@ async def batch_processor():
             first_request = await batch_queue.get()
             batch.append(first_request)
 
-            # Collect more requests within timeout window
-            deadline = asyncio.get_event_loop().time() + (BATCH_TIMEOUT_MS / 1000.0)
-
-            while len(batch) < MAX_BATCH_SIZE:
-                remaining = deadline - asyncio.get_event_loop().time()
-                if remaining <= 0:
-                    break
-
+            # Quick check: if more requests are already waiting, grab them immediately
+            while not batch_queue.empty() and len(batch) < MAX_BATCH_SIZE:
                 try:
-                    request = await asyncio.wait_for(
-                        batch_queue.get(),
-                        timeout=remaining
-                    )
-                    batch.append(request)
-                except asyncio.TimeoutError:
+                    batch.append(batch_queue.get_nowait())
+                except asyncio.QueueEmpty:
                     break
+
+            # If batch not full, wait briefly for more requests (adaptive timeout)
+            if len(batch) < MAX_BATCH_SIZE:
+                # Use shorter timeout if we already have some requests
+                timeout_ms = MIN_BATCH_WAIT_MS if len(batch) > 1 else BATCH_TIMEOUT_MS
+                deadline = asyncio.get_event_loop().time() + (timeout_ms / 1000.0)
+
+                while len(batch) < MAX_BATCH_SIZE:
+                    remaining = deadline - asyncio.get_event_loop().time()
+                    if remaining <= 0:
+                        break
+
+                    try:
+                        request = await asyncio.wait_for(
+                            batch_queue.get(),
+                            timeout=remaining
+                        )
+                        batch.append(request)
+                    except asyncio.TimeoutError:
+                        break
 
             # Process the collected batch
             await process_batch(batch)
@@ -853,6 +870,31 @@ async def activate_token(token_id: int, _: bool = Depends(get_admin_token)):
 
 # ============== Startup/Shutdown ==============
 
+def warm_up_tokenizer_pool():
+    """Pre-initialize tokenizers in thread pool to avoid cold start delays."""
+    import concurrent.futures
+
+    def init_worker_tokenizer():
+        # This runs in a worker thread and creates thread-local tokenizer
+        get_tokenizer()
+        return True
+
+    # Initialize tokenizers in all worker threads
+    futures = [tokenizer_pool.submit(init_worker_tokenizer) for _ in range(4)]
+    concurrent.futures.wait(futures)
+    print("Tokenizer pool warmed up")
+
+
+def warm_up_gpu():
+    """Run a warm-up translation to initialize GPU kernels."""
+    try:
+        # Simple warm-up translation
+        result = translate_text("Hello", "eng_Latn", "fra_Latn")
+        print(f"GPU warm-up complete (test: Hello -> {result})")
+    except Exception as e:
+        print(f"GPU warm-up failed: {e}")
+
+
 @app.on_event("startup")
 async def startup_event():
     """Initialize model, database, and batch processor on startup."""
@@ -860,6 +902,12 @@ async def startup_event():
 
     init_db()
     init_model()
+
+    # Warm up tokenizer pool to avoid first-request latency
+    warm_up_tokenizer_pool()
+
+    # Warm up GPU to initialize CUDA/HIP kernels
+    warm_up_gpu()
 
     # Initialize batch processing
     batch_queue = asyncio.Queue()
