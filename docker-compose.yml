@@ -16,6 +16,11 @@ services:
       - ADMIN_TOKEN=${ADMIN_TOKEN:-admin-secret-change-me}
       - ROCR_VISIBLE_DEVICES=0
       - LD_LIBRARY_PATH=/usr/local/lib:/opt/rocm/lib
+      # Performance tuning (can be adjusted)
+      - BATCH_TIMEOUT_MS=${BATCH_TIMEOUT_MS:-50}
+      - MAX_BATCH_SIZE=${MAX_BATCH_SIZE:-8}
+      - BEAM_SIZE=${BEAM_SIZE:-1}
+      - INTER_THREADS=${INTER_THREADS:-2}
     devices:
       - /dev/kfd:/dev/kfd
       - /dev/dri:/dev/dri
