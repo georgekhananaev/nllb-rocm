@@ -651,6 +651,17 @@ def init_model():
     return device_used
 
 
+MAX_SAFE_TOKENS = int(os.environ.get("MAX_SAFE_TOKENS", "200"))
+
+
+def count_tokens(text: str, source_lang: str) -> int:
+    """Count the number of tokens for a text without truncation."""
+    tokenizer = get_tokenizer()
+    tokenizer.src_lang = source_lang
+    encoded = tokenizer(text, return_tensors=None, truncation=False)
+    return len(encoded["input_ids"])
+
+
 def tokenize_text(text: str, source_lang: str) -> List[str]:
     """Tokenize text using a thread-local tokenizer."""
     tokenizer = get_tokenizer()
@@ -933,12 +944,36 @@ async def translate_endpoint(
             cached = True
             result = cached_result
         else:
-            result = await translate_text_async(
-                request.text,
-                request.source_lang,
-                request.target_lang,
-                beam_size
+            # Check if text is too long and needs sentence-level translation
+            token_count = await asyncio.get_event_loop().run_in_executor(
+                tokenizer_pool, count_tokens, request.text, request.source_lang
             )
+
+            if token_count > MAX_SAFE_TOKENS:
+                # Segment into sentences and translate each separately
+                sentences = segment_sentences(request.text, request.source_lang)
+                logger.info(
+                    "Segmenting long text",
+                    token_count=token_count,
+                    sentence_count=len(sentences),
+                )
+                translated_parts = []
+                for sentence in sentences:
+                    part = await translate_text_async(
+                        sentence,
+                        request.source_lang,
+                        request.target_lang,
+                        beam_size,
+                    )
+                    translated_parts.append(part)
+                result = " ".join(translated_parts)
+            else:
+                result = await translate_text_async(
+                    request.text,
+                    request.source_lang,
+                    request.target_lang,
+                    beam_size,
+                )
             # Store in cache
             await set_in_cache(cache_key, result)
 
