@@ -7,7 +7,10 @@ RUN pip install --no-cache-dir \
     transformers \
     sentencepiece \
     flask \
-    tokenizers
+    tokenizers \
+    fastapi \
+    uvicorn \
+    pysbd
 
 # Set environment for RX 6600 (gfx1032 -> gfx1030)
 ENV HSA_OVERRIDE_GFX_VERSION=10.3.0

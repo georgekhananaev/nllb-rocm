@@ -615,7 +615,7 @@ def init_model():
     global translator, device_used, device_name, model_loaded
 
     device, gpu_name = get_device()
-    compute_type = "int8" if device == "cpu" else "int8_float16"
+    compute_type = os.environ.get("COMPUTE_TYPE", "int8" if device == "cpu" else "int8_float16")
 
     logger.info("Loading model", path=MODEL_PATH, device=device, compute_type=compute_type)
 
@@ -651,7 +651,8 @@ def init_model():
     return device_used
 
 
-MAX_SAFE_TOKENS = int(os.environ.get("MAX_SAFE_TOKENS", "200"))
+MAX_SAFE_TOKENS = int(os.environ.get("MAX_SAFE_TOKENS", "80"))
+MAX_DECODE_LENGTH = int(os.environ.get("MAX_DECODE_LENGTH", "200"))
 
 
 def count_tokens(text: str, source_lang: str) -> int:
@@ -696,7 +697,15 @@ def translate_batch_sync(requests: List[BatchRequest]) -> List[str]:
     beam_size = requests[0].beam_size
 
     max_input_len = max(len(tokens) for tokens in source_batch)
-    adaptive_max_length = min(256, max(64, int(max_input_len * 2)))
+    adaptive_max_length = min(MAX_DECODE_LENGTH, max(64, int(max_input_len * 1.5)))
+
+    logger.info(
+        "Translating batch",
+        batch_size=len(requests),
+        max_input_tokens=max_input_len,
+        max_decode_length=adaptive_max_length,
+        beam_size=beam_size,
+    )
 
     results = translator.translate_batch(
         source_batch,
@@ -885,10 +894,12 @@ def translate_text(text: str, source_lang: str = "eng_Latn", target_lang: str = 
 # ============== Sentence Segmentation ==============
 
 def segment_sentences(text: str, language: str = "en") -> List[str]:
-    """Segment text into sentences using pysbd if available."""
+    """Segment text into sentences using pysbd if available, regex fallback otherwise."""
     if not PYSBD_AVAILABLE:
-        # Simple fallback
-        return [text]
+        # Regex fallback: split on sentence-ending punctuation followed by space
+        import re
+        sentences = re.split(r'(?<=[.!?])\s+', text.strip())
+        return [s for s in sentences if s.strip()]
 
     try:
         # Map NLLB language codes to pysbd languages
