@@ -95,8 +95,10 @@ def translate_endpoint():
     try:
         result = translate_text(text, source, target)
         return jsonify({"translation": result, "success": True})
-    except Exception as e:
-        return jsonify({"error": str(e), "success": False}), 500
+    except Exception:
+        # Keep the details in the server log; callers only get a generic message.
+        app.logger.exception("Translation failed")
+        return jsonify({"error": "Translation failed. Check the server logs for details.", "success": False}), 500
 
 @app.route("/languages", methods=["GET"])
 def languages():
